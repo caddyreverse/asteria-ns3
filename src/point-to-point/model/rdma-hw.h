@@ -285,8 +285,14 @@ public:
 	// send's answer arrives first (RdmaQueuePair::m_rackDeferLoss).
 	bool m_sprayRackDeferLoss;
 	bool ValidRackDeferLoss() const;
-	// Hands qp's waiting declarations of the rule to DeferTailLosses.
-	void DeferRackLosses(Ptr<RdmaQueuePair> qp);
+	// SprayPathDeferLoss, under LoadBalancing SprayUniform and
+	// SprayTailLossRtts above zero: the same for the declarations of the
+	// rule along one path (RdmaQueuePair::m_pathDeferLoss).
+	bool m_sprayPathDeferLoss;
+	bool ValidPathDeferLoss() const;
+	// Hands the declarations qp's answer left untold
+	// (RdmaQueuePair::m_deferredLosses) to DeferTailLosses.
+	void DeferAnswerLosses(Ptr<RdmaQueuePair> qp);
 	bool IsOverdueRepair() const;
 	bool ValidOverdueRepair() const;
 	// SprayAckLossRtts, under LoadBalancing SprayUniform with any selector:

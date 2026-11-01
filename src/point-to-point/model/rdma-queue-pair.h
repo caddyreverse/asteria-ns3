@@ -435,11 +435,19 @@ public:
 	uint64_t m_rackReorderNs;
 	// SprayRackDeferLoss: the sends the rule declares lost are repaired at
 	// once, but their loss is not told to the path selector here; they wait
-	// in m_rackDeferred for RdmaHw, which tells them as a tail repair
-	// request's declarations (DeferTailLosses), so that the late answer of a
-	// send that had only waited in a queue drops its loss.
+	// in m_deferredLosses.
 	bool m_rackDeferLoss;
-	std::vector<DeclaredSend> m_rackDeferred;
+	// SprayPathDeferLoss: the same for the sends the rule along one path
+	// (AcknowledgePacket) declares lost. When answers return along other
+	// paths than their data (AckRoute), two answers along one path can
+	// arrive in the opposite order to their data, and that rule then
+	// declares lost a send that arrived.
+	bool m_pathDeferLoss;
+	// The sends the two rules declared lost and did not tell the selector
+	// of, in the order declared, for RdmaHw, which tells them as a tail
+	// repair request's declarations (DeferTailLosses), so that the late
+	// answer of a send that had only waited in a queue drops its loss.
+	std::vector<DeclaredSend> m_deferredLosses;
 	// Declare lost the send of seq along path made at sentNs, if it is still
 	// outstanding, and queue its range for repair; its loss is evidence as a
 	// retransmission timeout's is (DeclareLostSentBy), or under m_overdueProbe
@@ -579,6 +587,10 @@ private:
 	// Returns the bytes declared lost. Without report the selector is not
 	// told.
 	uint32_t DeclareLost(uint64_t packet, bool report = true);
+	// DeclareLost; with deferred the selector is not told, and the send is
+	// appended to deferred for RdmaHw to tell later.
+	uint32_t DeclareLostDeferringTell(uint64_t packet,
+		std::vector<DeclaredSend> *deferred);
 	// Declare lost, for the selector alone, the copies along path sent
 	// before sentNs, and those ExpireCopies declares by nowNs.
 	void DeclareCopiesLostOnPath(uint16_t path, uint64_t sentNs, uint64_t nowNs);

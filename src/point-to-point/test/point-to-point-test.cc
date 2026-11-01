@@ -3611,11 +3611,11 @@ class RackDeferredLossTest : public TestCase
                                   2 * kMtu,
                                   "the sends at 0 and 2000 ns are lost");
             NS_TEST_EXPECT_MSG_EQ(qp->RepairBytesLeft(), 2 * kMtu, "both are repaired at once");
-            NS_TEST_EXPECT_MSG_EQ(qp->m_rackDeferred.size(), 2, "both wait to be told");
-            NS_TEST_EXPECT_MSG_EQ(qp->m_rackDeferred[1].seq, kMtu, "oldest first");
-            NS_TEST_EXPECT_MSG_EQ(qp->m_rackDeferred[1].path, 1, "with the path it left along");
-            sender.hw->DeferRackLosses(qp);
-            NS_TEST_EXPECT_MSG_EQ(qp->m_rackDeferred.empty(), true, "the host holds them now");
+            NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses.size(), 2, "both wait to be told");
+            NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses[1].seq, kMtu, "oldest first");
+            NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses[1].path, 1, "with the path it left along");
+            sender.hw->DeferAnswerLosses(qp);
+            NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses.empty(), true, "the host holds them now");
             NS_TEST_EXPECT_MSG_EQ(sender.hw->m_tailLosses.size(), 2, "as tail repair losses");
             NS_TEST_EXPECT_MSG_EQ(sender.hw->m_tailLosses.begin()->first,
                                   4000,
@@ -3666,6 +3666,134 @@ class RackDeferredLossTest : public TestCase
                                   "the answered packet's record is gone either way");
             Simulator::Destroy();
         }
+    }
+};
+
+class PathDeferredLossTest : public TestCase
+{
+  public:
+    PathDeferredLossTest()
+        : TestCase("Under SprayPathDeferLoss the send an answer along its path declares lost is "
+                   "repaired at once and told a tail repair guard later, unless its late answer "
+                   "drops the loss")
+    {
+    }
+
+    void DoRun() override
+    {
+        QueuePair();
+        Host(false, true);
+        Host(true, true);
+        Host(true, false);
+        Validation();
+    }
+
+  private:
+    static constexpr uint32_t kMtu = IsolatedHost::kMtu;
+    static constexpr uint16_t kPath = 3;
+
+    // A queue pair of sender with packets 0 and 1 outstanding along kPath,
+    // sent at 0 and 100 ns, whose selector writes down what it is told.
+    static Ptr<RdmaQueuePair> TwoSendsAlongPath(IsolatedHost& sender, ScriptedSelector*& selector)
+    {
+        Ptr<RdmaQueuePair> qp = sender.AddSender(kTestSender, kTestReceiver, 10 * kMtu);
+        auto scripted = std::make_unique<ScriptedSelector>(std::vector<uint16_t>{kPath});
+        selector = scripted.get();
+        qp->m_pathSelector = std::move(scripted);
+        qp->snd_nxt = 2 * kMtu;
+        qp->m_highest_sent = 2 * kMtu;
+        qp->m_outstanding.Add(0, kMtu, kPath, 0);
+        qp->m_outstanding.Add(kMtu, kMtu, kPath, 100);
+        return qp;
+    }
+
+    static std::string Told(const ScriptedSelector& selector)
+    {
+        std::string joined;
+        for (const std::string& event : selector.told)
+        {
+            joined += (joined.empty() ? "" : ", ") + event;
+        }
+        return joined;
+    }
+
+    // The queue pair alone: packet 1's answer leaves packet 0's loss in its
+    // list.
+    void QueuePair()
+    {
+        IsolatedHost sender(LoadBalancingMode::SprayUniform, kTestReceiver, 8);
+        ScriptedSelector* selector = nullptr;
+        Ptr<RdmaQueuePair> qp = TwoSendsAlongPath(sender, selector);
+        qp->m_pathDeferLoss = true;
+        NS_TEST_EXPECT_MSG_EQ(qp->AcknowledgePacket(kMtu, kPath), kMtu, "packet 0 is lost");
+        NS_TEST_EXPECT_MSG_EQ(qp->RepairBytesLeft(), kMtu, "and repaired at once");
+        NS_TEST_EXPECT_MSG_EQ(Told(*selector), "", "but its loss is not told");
+        NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses.size(), 1u, "it waits to be told");
+        if (!qp->m_deferredLosses.empty())
+        {
+            NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses[0].seq, 0u, "packet 0");
+            NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses[0].path, kPath, "with the path it left along");
+        }
+        Simulator::Destroy();
+    }
+
+    // Through the host, with a guard of four base RTTs of 100 ns: packet 1's
+    // answer at 0 ns, and with lateAnswer packet 0's at 200 ns.
+    void Host(bool defer, bool lateAnswer)
+    {
+        IsolatedHost sender(LoadBalancingMode::SprayUniform, kTestReceiver, 8);
+        sender.hw->m_sprayPathDeferLoss = defer;
+        sender.hw->m_sprayTailLossRtts = 4;
+        ScriptedSelector* selector = nullptr;
+        Ptr<RdmaQueuePair> qp = TwoSendsAlongPath(sender, selector);
+        qp->m_baseRtt = 100;
+        NS_TEST_EXPECT_MSG_EQ(qp->m_pathDeferLoss, defer, "the queue pair takes the host's key");
+        const uint16_t identification = SpineIdentification(kPath, kPath);
+        sender.ReceiveAck(kTestReceiver, 0, kMtu, identification);
+        NS_TEST_EXPECT_MSG_EQ(qp->m_recovery_events, 1u, "packet 0 is declared lost");
+        NS_TEST_EXPECT_MSG_EQ(qp->RepairBytesLeft(), kMtu, "and repaired at once");
+        NS_TEST_EXPECT_MSG_EQ(Told(*selector),
+                              (defer ? "ack 3" : "ack 3, loss 3"),
+                              "its loss is told at once only without the key");
+        NS_TEST_EXPECT_MSG_EQ(qp->m_deferredLosses.empty(), true, "the host took the list");
+        NS_TEST_EXPECT_MSG_EQ(sender.hw->m_tailLosses.size(),
+                              (defer ? 1u : 0u),
+                              "the host holds the loss untold");
+        if (defer && !sender.hw->m_tailLosses.empty())
+        {
+            NS_TEST_EXPECT_MSG_EQ(sender.hw->m_tailLosses.begin()->first,
+                                  400u,
+                                  "due four base RTTs later");
+        }
+        if (lateAnswer)
+        {
+            Simulator::Schedule(NanoSeconds(200), [&sender, identification]() {
+                sender.ReceiveAck(kTestReceiver, 2 * kMtu, 0, identification);
+            });
+        }
+        Simulator::Stop(NanoSeconds(900));
+        Simulator::Run();
+        const std::string expected = !defer      ? "ack 3, loss 3, ack 3"
+                                     : lateAnswer ? "ack 3, ack 3"
+                                                  : "ack 3, loss 3";
+        NS_TEST_EXPECT_MSG_EQ(Told(*selector), expected, "the selector hears the loss once at most");
+        NS_TEST_EXPECT_MSG_EQ(sender.hw->m_tailLossesDelivered,
+                              (defer && lateAnswer ? 1u : 0u),
+                              "the late answer drops a waiting loss as delivered");
+        NS_TEST_EXPECT_MSG_EQ(sender.hw->m_tailLosses.empty(), true, "nothing waits at the end");
+        Simulator::Destroy();
+    }
+
+    void Validation()
+    {
+        Ptr<RdmaHw> hw = CreateObject<RdmaHw>();
+        NS_TEST_EXPECT_MSG_EQ(hw->ValidPathDeferLoss(), true, "off needs nothing");
+        hw->m_sprayPathDeferLoss = true;
+        NS_TEST_EXPECT_MSG_EQ(hw->ValidPathDeferLoss(), false, "refused off LoadBalancing 2");
+        hw->m_loadBalancing = static_cast<uint32_t>(LoadBalancingMode::SprayUniform);
+        NS_TEST_EXPECT_MSG_EQ(hw->ValidPathDeferLoss(), true, "read under it with the default guard");
+        hw->m_sprayTailLossRtts = 0;
+        NS_TEST_EXPECT_MSG_EQ(hw->ValidPathDeferLoss(), false, "refused without a guard");
     }
 };
 
@@ -18304,6 +18432,7 @@ PointToPointTestSuite::PointToPointTestSuite()
     AddTestCase(new SelectiveTimeoutTest, TestCase::Duration::QUICK);
     AddTestCase(new RackLossRuleTest, TestCase::Duration::QUICK);
     AddTestCase(new RackDeferredLossTest, TestCase::Duration::QUICK);
+    AddTestCase(new PathDeferredLossTest, TestCase::Duration::QUICK);
     AddTestCase(new ThemisSelectorTest, TestCase::Duration::QUICK);
     AddTestCase(new ThemisDestinationTest, TestCase::Duration::QUICK);
     AddTestCase(new ThemisSenderTest, TestCase::Duration::QUICK);

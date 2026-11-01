@@ -773,6 +773,17 @@ TypeId RdmaHw::GetTypeId (void)
 				BooleanValue(false),
 				MakeBooleanAccessor(&RdmaHw::m_sprayRackDeferLoss),
 				MakeBooleanChecker())
+		.AddAttribute("SprayPathDeferLoss",
+				"Under LoadBalancing 2 and SprayTailLossRtts above zero, "
+				"whether the sends the loss rule along one path declares "
+				"lost, those an answer to a later send along the same path "
+				"finds outstanding, are told to the path selector as a tail "
+				"repair request's declarations are: SprayTailLossRtts base "
+				"RTTs later, unless the declared send's answer arrives first. "
+				"They are repaired at once either way. Default false.",
+				BooleanValue(false),
+				MakeBooleanAccessor(&RdmaHw::m_sprayPathDeferLoss),
+				MakeBooleanChecker())
 		.AddAttribute("SprayAckLossRtts",
 				"Under LoadBalancing 2, the queue pair's base RTTs after "
 				"which a send the cumulative acknowledgement covered before "
@@ -1433,6 +1444,9 @@ void RdmaHw::Setup(QpCompleteCallback cb, QpFailureCallback failure_cb){
 	NS_ABORT_MSG_IF(!ValidRackDeferLoss(),
 		"SprayRackDeferLoss needs SprayRackReorderNs and SprayTailLossRtts "
 		"above zero");
+	NS_ABORT_MSG_IF(!ValidPathDeferLoss(),
+		"SprayPathDeferLoss is read only under LoadBalancing 2 and needs "
+		"SprayTailLossRtts above zero");
 	NS_ABORT_MSG_IF(!ValidReceiverHold(),
 		"SprayReceiverHold needs SprayPathSeq, PathSelector 6, 7 or 9, "
 		"SwitchQueueState for the hosts' leaves, and acknowledgements carry "
@@ -2177,12 +2191,18 @@ bool RdmaHw::ValidRackDeferLoss() const{
 		(m_sprayRackReorderNs > 0 && m_sprayTailLossRtts > 0);
 }
 
-void RdmaHw::DeferRackLosses(Ptr<RdmaQueuePair> qp){
-	if (qp->m_rackDeferred.empty())
+bool RdmaHw::ValidPathDeferLoss() const{
+	return !m_sprayPathDeferLoss || (m_loadBalancing ==
+			static_cast<uint32_t>(LoadBalancingMode::SprayUniform) &&
+		m_sprayTailLossRtts > 0);
+}
+
+void RdmaHw::DeferAnswerLosses(Ptr<RdmaQueuePair> qp){
+	if (qp->m_deferredLosses.empty())
 		return;
-	DeferTailLosses(qp, qp->m_rackDeferred,
+	DeferTailLosses(qp, qp->m_deferredLosses,
 		static_cast<uint64_t>(m_sprayTailLossRtts * qp->m_baseRtt));
-	qp->m_rackDeferred.clear();
+	qp->m_deferredLosses.clear();
 }
 
 bool RdmaHw::ValidAckLoss() const{
@@ -2598,7 +2618,7 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch){
 					HandleAckNscc(qp, ch.ack.packet_seq, path, cnp, rcvCwndPend);
 				else
 					qp->AcknowledgePacket(ch.ack.packet_seq, path);
-				DeferRackLosses(qp);
+				DeferAnswerLosses(qp);
 				// The answer to a send the cumulative acknowledgement covered
 				// first finds no record; the selector has heard it above.
 				if (!qp->m_covered.empty())
@@ -3883,6 +3903,7 @@ bool RdmaHw::StartPathSelection(Ptr<RdmaQueuePair> qp, uint64_t bdpBytes,
 		m_sprayOverdueRepair == static_cast<uint32_t>(OverdueRepair::Reprobe);
 	qp->m_rackReorderNs = m_sprayRackReorderNs;
 	qp->m_rackDeferLoss = m_sprayRackDeferLoss;
+	qp->m_pathDeferLoss = m_sprayPathDeferLoss;
 	if (IsThemis()){
 		uint64_t &next = m_themisPsnNext[GetQpKey(qp->dip.Get(), 0, qp->m_pg)];
 		qp->m_psnBase = next;

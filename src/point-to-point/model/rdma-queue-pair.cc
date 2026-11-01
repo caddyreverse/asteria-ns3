@@ -266,6 +266,7 @@ RdmaQueuePair::RdmaQueuePair(uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, ui
 	m_overdueRepeat = false;
 	m_rackReorderNs = 0;
 	m_rackDeferLoss = false;
+	m_pathDeferLoss = false;
 	m_psnBase = 0;
 	m_timeout_covered_losses = 0;
 	m_ack_loss_declared = 0;
@@ -485,7 +486,8 @@ uint64_t RdmaQueuePair::AcknowledgePacket(uint64_t seq, uint16_t path){
 		if (CoveredAnswerLoss(m_outstanding.Seq(older), m_outstanding.Size(older)))
 			m_outstanding.Remove(older);
 		else
-			lost += DeclareLost(older);
+			lost += DeclareLostDeferringTell(older,
+				m_pathDeferLoss ? &m_deferredLosses : nullptr);
 	}
 	// Across paths by send time: with many paths two outstanding sends
 	// rarely share one, so the rule above seldom applies.
@@ -507,10 +509,8 @@ uint64_t RdmaQueuePair::AcknowledgePacket(uint64_t seq, uint16_t path){
 				m_outstanding.Remove(oldest);
 				continue;
 			}
-			if (m_rackDeferLoss)
-				m_rackDeferred.push_back(DeclaredSend{m_outstanding.Seq(oldest),
-					m_outstanding.Path(oldest), m_outstanding.Trickle(oldest)});
-			lost += DeclareLost(oldest, !m_rackDeferLoss);
+			lost += DeclareLostDeferringTell(oldest,
+				m_rackDeferLoss ? &m_deferredLosses : nullptr);
 		}
 	}
 	const uint64_t nowNs = Simulator::Now().GetNanoSeconds();
@@ -773,10 +773,7 @@ uint64_t RdmaQueuePair::DeclareLostOnPathSeqs(uint16_t path, uint16_t first,
 			m_outstanding.Remove(*send);
 			continue;
 		}
-		if (deferred)
-			deferred->push_back(DeclaredSend{m_outstanding.Seq(*send),
-				m_outstanding.Path(*send), m_outstanding.Trickle(*send)});
-		lost += DeclareLost(*send, !deferred);
+		lost += DeclareLostDeferringTell(*send, deferred);
 	}
 	m_tail_declared_lost += named.size();
 	if (named.empty())
@@ -872,6 +869,14 @@ uint32_t RdmaQueuePair::DeclareLost(uint64_t packet, bool report){
 	m_outstanding.RemoveLost(packet);
 	m_recovery_events++;
 	return size;
+}
+
+uint32_t RdmaQueuePair::DeclareLostDeferringTell(uint64_t packet,
+		std::vector<DeclaredSend> *deferred){
+	if (deferred)
+		deferred->push_back(DeclaredSend{m_outstanding.Seq(packet),
+			m_outstanding.Path(packet), m_outstanding.Trickle(packet)});
+	return DeclareLost(packet, !deferred);
 }
 
 uint64_t RdmaQueuePair::RepairBytesLeft(){

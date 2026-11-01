@@ -405,6 +405,14 @@ bool spray_rack_reorder_ns_given = false;
 // tail_loss_delivered or tail_loss_ambiguous). Default off.
 std::string spray_rack_defer_loss = "off";
 bool spray_rack_defer_loss_given = false;
+// Under LOAD_BALANCING spray_uniform and SPRAY_TAIL_LOSS_RTTS above 0,
+// SPRAY_PATH_DEFER_LOSS on: the same for the sends that the answer to a later
+// send along the same path declares lost; they are repaired at once, but the
+// path selector is told of their loss SPRAY_TAIL_LOSS_RTTS base RTTs later,
+// and the declared send's answer arriving before then drops the loss.
+// Default off.
+std::string spray_path_defer_loss = "off";
+bool spray_path_defer_loss_given = false;
 // PATH_SELECTOR themis, under LOAD_BALANCING spray_uniform: Themis (Liu et
 // al., EuroSys 2026) over spines. A queue pair's packet of sequence number p,
 // numbered on from the connection's earlier queue pairs, goes up the spine of
@@ -2594,6 +2602,16 @@ bool valid_hold_rule() {
                  "SPRAY_RACK_REORDER_NS and SPRAY_TAIL_LOSS_RTTS above 0\n";
     return false;
   }
+  if (spray_path_defer_loss != "on" && spray_path_defer_loss != "off") {
+    std::cerr << "SPRAY_PATH_DEFER_LOSS must be on or off\n";
+    return false;
+  }
+  if (spray_path_defer_loss_given &&
+      (load_balancing != "spray_uniform" || spray_tail_loss_rtts <= 0)) {
+    std::cerr << "SPRAY_PATH_DEFER_LOSS is read only under LOAD_BALANCING "
+                 "spray_uniform and SPRAY_TAIL_LOSS_RTTS above 0\n";
+    return false;
+  }
   // Without a loss hold, reps_spine, reps_oracle and the uniform draw read
   // reprobe alone.
   const bool overdue_without_hold =
@@ -2910,6 +2928,9 @@ bool ReadConf(string network_configuration) {
     } else if (key.compare("SPRAY_RACK_DEFER_LOSS") == 0) {
       conf >> spray_rack_defer_loss;
       spray_rack_defer_loss_given = true;
+    } else if (key.compare("SPRAY_PATH_DEFER_LOSS") == 0) {
+      conf >> spray_path_defer_loss;
+      spray_path_defer_loss_given = true;
     } else if (key.compare("SPRAY_THEMIS_PATHS") == 0) {
       conf >> spray_themis_paths;
     } else if (key.compare("SPRAY_THEMIS_OOO_THRESHOLD") == 0) {
@@ -4459,6 +4480,8 @@ bool SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),
                            UintegerValue(spray_rack_reorder_ns));
       rdmaHw->SetAttribute("SprayRackDeferLoss",
                            BooleanValue(spray_rack_defer_loss == "on"));
+      rdmaHw->SetAttribute("SprayPathDeferLoss",
+                           BooleanValue(spray_path_defer_loss == "on"));
       rdmaHw->SetAttribute("SprayThemisPaths", UintegerValue(spray_themis_paths));
       rdmaHw->SetAttribute("SprayThemisOooThreshold",
                            UintegerValue(spray_themis_ooo_threshold));
