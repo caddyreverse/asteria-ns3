@@ -1004,6 +1004,15 @@ bool RdmaQueuePair::IsFailed(){
 	return m_failed;
 }
 
+void RdmaQueuePair::CancelTimers(){
+	for (EventId *timer : {&m_retransmissionTimer, &m_ackLossTimer,
+			&m_overdueTimer, &mlx.m_eventUpdateAlpha, &mlx.m_eventDecreaseRate,
+			&mlx.m_rpTimer}){
+		Simulator::Cancel(*timer);
+		*timer = EventId();
+	}
+}
+
 /*********************
  * RdmaRxQueuePair
  ********************/

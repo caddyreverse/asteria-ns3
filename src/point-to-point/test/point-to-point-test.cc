@@ -3526,6 +3526,80 @@ class SelectiveTimeoutTest : public TestCase
     }
 };
 
+class FinishedQueuePairFreedTest : public TestCase
+{
+  public:
+    FinishedQueuePairFreedTest()
+        : TestCase("A queue pair that completes or fails with its retransmission, "
+                   "acknowledgement-loss and overdue-send timers set, and under DCQCN its rate "
+                   "timers, is held by nothing else once their cancelled events have left "
+                   "the scheduler")
+    {
+    }
+
+    void DoRun() override
+    {
+        for (const uint32_t ccMode : {0u, 1u})
+        {
+            const std::string which = ccMode == 1 ? "dcqcn: " : "";
+            IsolatedHost sender(LoadBalancingMode::SprayUniform, kTestReceiver, 8);
+            Ptr<RdmaHw> hw = sender.hw;
+            hw->m_cc_mode = ccMode;
+            hw->m_qpCompleteCallback =
+                Callback<void, Ptr<RdmaQueuePair>>([](Ptr<RdmaQueuePair>) {});
+            hw->m_qpFailureCallback =
+                Callback<void, Ptr<RdmaQueuePair>, uint32_t>([](Ptr<RdmaQueuePair>, uint32_t) {});
+            Ptr<RdmaQueuePair> completed = Sending(sender, IsolatedHost::kSenderPort, which);
+            Ptr<RdmaQueuePair> failed = Sending(sender, IsolatedHost::kSenderPort + 1, which);
+            completed->Acknowledge(completed->m_size);
+            hw->QpComplete(completed);
+            hw->QpFail(failed, static_cast<uint32_t>(RdmaFailureReason::TimeoutRetryExhausted));
+            Simulator::Run();
+
+            NS_TEST_EXPECT_MSG_EQ(completed->GetReferenceCount(),
+                                  1u,
+                                  which + "the completed queue pair is held here alone");
+            NS_TEST_EXPECT_MSG_EQ(failed->GetReferenceCount(),
+                                  1u,
+                                  which + "and so is the failed one");
+            Simulator::Destroy();
+        }
+    }
+
+  private:
+    // A queue pair of one packet, sent and outstanding, covered by an answer
+    // to a later send and taken as overdue, so that each of its timers is set;
+    // under DCQCN it has also taken a congestion notification.
+    Ptr<RdmaQueuePair> Sending(IsolatedHost& sender, uint16_t port, const std::string& which)
+    {
+        constexpr uint32_t kMtu = IsolatedHost::kMtu;
+        Ptr<RdmaHw> hw = sender.hw;
+        Ptr<RdmaQueuePair> qp = sender.AddSender(kTestSender, kTestReceiver, kMtu, port);
+        qp->m_baseRtt = 2000;
+        qp->m_notifyAppFinish = Callback<void>([]() {});
+        qp->snd_nxt = kMtu;
+        qp->m_highest_sent = kMtu;
+        qp->m_outstanding.Add(0, kMtu, 0, 0);
+        hw->ArmRetransmissionTimeout(qp);
+        qp->m_covered.push_back(RdmaQueuePair::CoveredSend{{0, 0, 0, false, false}, 0});
+        hw->ArmAckLossTimer(qp);
+        hw->TakeOverdueSend(qp, 0, 0, 0, false, false);
+        NS_TEST_EXPECT_MSG_EQ(qp->m_retransmissionTimer.IsPending() &&
+                                  qp->m_ackLossTimer.IsPending() && qp->m_overdueTimer.IsPending(),
+                              true,
+                              which + "the queue pair's timers are set");
+        if (hw->m_cc_mode == 1)
+        {
+            hw->cnp_received_mlx(qp);
+            NS_TEST_EXPECT_MSG_EQ(qp->mlx.m_eventUpdateAlpha.IsPending() &&
+                                      qp->mlx.m_eventDecreaseRate.IsPending(),
+                                  true,
+                                  which + "and its rate timers");
+        }
+        return qp;
+    }
+};
+
 class RackLossRuleTest : public TestCase
 {
   public:
@@ -14803,7 +14877,8 @@ class SprayReceiverTailMissingTest : public TestCase
                    "a black-holed spine is held, counts no late, trimmed or gap-counted "
                    "packet, and reports the counted packets that arrive after all; under "
                    "SprayStrayPathSeq closed a packet arriving after its flow's receive queue "
-                   "pair was removed is read against that queue pair")
+                   "pair was removed is read against that queue pair; and a removed receive "
+                   "queue pair whose timers have fired is freed")
     {
     }
 
@@ -14830,6 +14905,7 @@ class SprayReceiverTailMissingTest : public TestCase
         TrimmedAfterRequest();
         GapsNotCountedTwice();
         StraysAfterRemoval();
+        RemovedQueuePairFreed();
 
         CustomHeader::ackTailNackBytes = savedNack;
         CustomHeader::udpTailCounts = savedCounts;
@@ -15352,6 +15428,33 @@ class SprayReceiverTailMissingTest : public TestCase
             NS_TEST_EXPECT_MSG_EQ(hold.Holds(0, kLossy), true, "spine 3 is held either way");
             Simulator::Destroy();
         }
+    }
+
+    // A receive queue pair whose tail run was requested and counted, both its
+    // timers fired with nothing left, is held by nothing else once removed.
+    void RemovedQueuePairFreed()
+    {
+        Receiver receiver(true);
+        Ptr<RdmaHw> hw = receiver.host.hw;
+        receiver.Deliver(kClosingNs, kA, kClosing, 0, Counts(1));
+        Ptr<RdmaRxQueuePair> removed;
+        Simulator::Schedule(NanoSeconds(kGuardEndNs + 100), [hw, &removed]() {
+            removed = hw->GetRxQp(kR.Get(),
+                                  kA.Get(),
+                                  IsolatedHost::kReceiverPort,
+                                  IsolatedHost::kSenderPort,
+                                  IsolatedHost::kPriorityGroup,
+                                  false);
+            hw->DeleteRxQp(kA.Get(), IsolatedHost::kPriorityGroup, IsolatedHost::kSenderPort);
+        });
+        Simulator::Run();
+        NS_TEST_EXPECT_MSG_EQ(receiver.Requests().size(), 1u, "the run is requested");
+        NS_TEST_EXPECT_MSG_EQ(receiver.counted, 1u, "and counted missing");
+        NS_TEST_ASSERT_MSG_NE(removed, nullptr, "the queue pair is removed");
+        NS_TEST_EXPECT_MSG_EQ(removed->GetReferenceCount(),
+                              1u,
+                              "the removed queue pair is held here alone");
+        Simulator::Destroy();
     }
 
     // Test (e): a gap and the closing counts name a packet once. From a, 1
@@ -18430,6 +18533,7 @@ PointToPointTestSuite::PointToPointTestSuite()
     AddTestCase(new ReorderGapTest, TestCase::Duration::QUICK);
     AddTestCase(new OutstandingPacketsModelTest, TestCase::Duration::QUICK);
     AddTestCase(new SelectiveTimeoutTest, TestCase::Duration::QUICK);
+    AddTestCase(new FinishedQueuePairFreedTest, TestCase::Duration::QUICK);
     AddTestCase(new RackLossRuleTest, TestCase::Duration::QUICK);
     AddTestCase(new RackDeferredLossTest, TestCase::Duration::QUICK);
     AddTestCase(new PathDeferredLossTest, TestCase::Duration::QUICK);

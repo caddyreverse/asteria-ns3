@@ -581,6 +581,10 @@ public:
 	uint64_t GetWin(); // window size calculated from m_rate
 	bool IsFinished();
 	bool IsFailed();
+	// Cancel every timer and reset its event id. An event holds the queue
+	// pair it was scheduled with, so an id left set keeps the queue pair
+	// alive after it is deleted.
+	void CancelTimers();
 	uint64_t HpGetCurWin(); // window size calculated from hp.m_curRate, used by HPCC
 
 private:

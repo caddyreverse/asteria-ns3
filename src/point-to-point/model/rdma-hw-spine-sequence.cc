@@ -151,9 +151,12 @@ void RdmaHw::RequestTailRuns(Ptr<RdmaRxQueuePair> q){
 	for (const PendingTailRuns::Request &request : q->m_tailRuns.TakeDue(now))
 		SendTailNack(q, request.spine, request.first, request.count);
 	const uint64_t next = q->m_tailRuns.NextDue();
+	// With no run left the id is reset, as the event that ran holds q.
 	if (next != PendingTailRuns::kNone)
 		q->m_tailTimer = Simulator::Schedule(NanoSeconds(next - now),
 			&RdmaHw::RequestTailRuns, this, q);
+	else
+		q->m_tailTimer = EventId();
 }
 
 void RdmaHw::SendTailNack(Ptr<RdmaRxQueuePair> q, uint8_t spine,
@@ -207,9 +210,12 @@ void RdmaHw::CountTailMissing(Ptr<RdmaRxQueuePair> q){
 			ReportTailMissing("receiver_tail_missing", run.spine);
 	}
 	const uint64_t next = q->m_tailMissingRuns.NextDue();
+	// With no run left the id is reset, as the event that ran holds q.
 	if (next != PendingTailRuns::kNone)
 		q->m_tailMissingTimer = Simulator::Schedule(NanoSeconds(next - now),
 			&RdmaHw::CountTailMissing, this, q);
+	else
+		q->m_tailMissingTimer = EventId();
 }
 
 void RdmaHw::ReportTailMissing(const char *event, uint8_t spine){

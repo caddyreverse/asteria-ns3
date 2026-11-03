@@ -3596,19 +3596,12 @@ void RdmaHw::ReportTransportEvent(const char* event, uint64_t bytes){
 
 void RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp){
 	NS_ASSERT(!m_qpCompleteCallback.IsNull());
-	Simulator::Cancel(qp->m_retransmissionTimer);
-	Simulator::Cancel(qp->m_ackLossTimer);
-	Simulator::Cancel(qp->m_overdueTimer);
+	qp->CancelTimers();
 	qp->m_covered.clear();
 	LeaveNsccConnection(qp);
 	// The losses of qp still waiting in m_tailLosses stay: the trim
 	// notification of a send can still follow, and m_tailLosses tells them
 	// when due.
-	if (m_cc_mode == 1){
-		Simulator::Cancel(qp->mlx.m_eventUpdateAlpha);
-		Simulator::Cancel(qp->mlx.m_eventDecreaseRate);
-		Simulator::Cancel(qp->mlx.m_rpTimer);
-	}
 
 	// This callback will log info
 	// It may also delete the rxQp on the receiver
@@ -3626,17 +3619,10 @@ void RdmaHw::QpFail(Ptr<RdmaQueuePair> qp, uint32_t reason){
 	NS_ASSERT(!m_qpFailureCallback.IsNull());
 	qp->m_failed = true;
 	qp->m_failure_reason = reason;
-	Simulator::Cancel(qp->m_retransmissionTimer);
-	Simulator::Cancel(qp->m_ackLossTimer);
-	Simulator::Cancel(qp->m_overdueTimer);
+	qp->CancelTimers();
 	qp->m_covered.clear();
 	DropTailLosses(qp);
 	LeaveNsccConnection(qp);
-	if (m_cc_mode == 1){
-		Simulator::Cancel(qp->mlx.m_eventUpdateAlpha);
-		Simulator::Cancel(qp->mlx.m_eventDecreaseRate);
-		Simulator::Cancel(qp->mlx.m_rpTimer);
-	}
 	m_qpFailureCallback(qp, reason);
 	DeleteQueuePair(qp);
 }
